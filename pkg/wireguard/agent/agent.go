@@ -27,8 +27,6 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/cidr"
-	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
-	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
@@ -215,10 +213,12 @@ func (a *Agent) Init(ipcache *ipcache.IPCache, mtuConfig mtu.Configuration) erro
 		}
 	}
 
+	fwMark := 0x4d2
 	cfg := wgtypes.Config{
 		PrivateKey:   &a.privKey,
 		ListenPort:   &a.listenPort,
 		ReplacePeers: false,
+		FirewallMark: &fwMark,
 	}
 	if err := a.wgClient.ConfigureDevice(types.IfaceName, cfg); err != nil {
 		return fmt.Errorf("failed to configure wireguard device: %w", err)
@@ -239,47 +239,6 @@ func (a *Agent) Init(ipcache *ipcache.IPCache, mtuConfig mtu.Configuration) erro
 	}
 	for _, peer := range dev.Peers {
 		a.restoredPubKeys[peer.PublicKey] = struct{}{}
-	}
-
-	// Create the rule to steer the marked traffic (from a local endpoint to a
-	// remote endpoint) via the Wireguard tunnel
-	rule := route.Rule{
-		Priority: linux_defaults.RulePriorityWireguard,
-		Mark:     linux_defaults.RouteMarkEncrypt,
-		Mask:     linux_defaults.RouteMarkMask,
-		Table:    linux_defaults.RouteTableWireguard,
-	}
-	rt := route.Route{
-		Device: types.IfaceName,
-		Table:  linux_defaults.RouteTableWireguard,
-	}
-	if option.Config.EnableIPv4 {
-		if err := route.ReplaceRule(rule); err != nil {
-			return fmt.Errorf("failed to upsert ipv4 rule: %w", err)
-		}
-
-		subnet := net.IPNet{
-			IP:   net.IPv4zero,
-			Mask: net.CIDRMask(0, 8*net.IPv4len),
-		}
-		rt.Prefix = subnet
-		if _, err := route.Upsert(rt); err != nil {
-			return fmt.Errorf("failed to upsert ipv4 route: %w", err)
-		}
-	}
-	if option.Config.EnableIPv6 {
-		if err := route.ReplaceRuleIPv6(rule); err != nil {
-			return fmt.Errorf("failed to upsert ipv6 rule: %w", err)
-		}
-
-		subnet := net.IPNet{
-			IP:   net.IPv6zero,
-			Mask: net.CIDRMask(0, 8*net.IPv6len),
-		}
-		rt.Prefix = subnet
-		if _, err := route.Upsert(rt); err != nil {
-			return fmt.Errorf("failed to upsert ipv6 route: %w", err)
-		}
 	}
 
 	// this is read by the defer statement above
@@ -352,9 +311,16 @@ func (a *Agent) UpdatePeer(nodeName, pubKeyHex string, nodeIPv4, nodeIPv6 net.IP
 		var lookupIPv4, lookupIPv6 net.IP
 		if option.Config.EnableIPv4 && nodeIPv4 != nil {
 			lookupIPv4 = nodeIPv4
+			// TODO hack
+			nodeIP := net.IPNet{
+				IP:   nodeIPv4,
+				Mask: net.CIDRMask(32, 32),
+			}
+			allowedIPs = append(allowedIPs, nodeIP)
 		}
 		if option.Config.EnableIPv6 && nodeIPv6 != nil {
 			lookupIPv6 = nodeIPv6
+			// TODO add ipv6 case
 		}
 		allowedIPs = append(allowedIPs, a.ipCache.LookupByHostRLocked(lookupIPv4, lookupIPv6)...)
 	}
