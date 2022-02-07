@@ -4,6 +4,8 @@
 package egressgateway
 
 import (
+	"net"
+	"sort"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -14,6 +16,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/egressmap"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 )
 
 var (
@@ -24,15 +27,21 @@ type k8sCacheSyncedChecker interface {
 	K8sCacheIsSynced() bool
 }
 
-// The egressgateway manager stores the internal data tracking policies and
-// endpoints. It also hooks up all the callbacks to update egress bpf policy map
-// accordingly.
+// The egressgateway manager stores the internal data tracking the node, policy,
+// endpoint, and lease mappings. It also hooks up all the callbacks to update
+// egress bpf policy map accordingly.
 type Manager struct {
 	mutex lock.Mutex
 
 	// k8sCacheSyncedChecker is used to check if the agent has synced its
 	// cache with the k8s API server
 	k8sCacheSyncedChecker k8sCacheSyncedChecker
+
+	// nodeDataStore stores node name to node mapping
+	nodeDataStore map[string]nodeTypes.Node
+
+	// nodes stores nodes sorted by their name
+	nodes []nodeTypes.Node
 
 	// policyConfigs stores policy configs indexed by policyID
 	policyConfigs map[policyID]*PolicyConfig
@@ -45,6 +54,7 @@ type Manager struct {
 func NewEgressGatewayManager(k8sCacheSyncedChecker k8sCacheSyncedChecker) *Manager {
 	manager := &Manager{
 		k8sCacheSyncedChecker: k8sCacheSyncedChecker,
+		nodeDataStore:         make(map[string]nodeTypes.Node),
 		policyConfigs:         make(map[policyID]*PolicyConfig),
 		epDataStore:           make(map[endpointID]*endpointMetadata),
 	}
@@ -67,16 +77,15 @@ func (manager *Manager) runReconciliationAfterK8sSync() {
 		}
 
 		manager.mutex.Lock()
-		defer manager.mutex.Unlock()
-
 		manager.reconcile()
+		manager.mutex.Unlock()
 	}()
 }
 
 // Event handlers
 
-// OnAddEgressPolicy and updates the manager internal state with the policy
-// config fields.
+// OnAddEgressPolicy parses the given policy config, and updates internal state
+// with the config fields.
 func (manager *Manager) OnAddEgressPolicy(config PolicyConfig) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
@@ -95,7 +104,7 @@ func (manager *Manager) OnAddEgressPolicy(config PolicyConfig) {
 }
 
 // OnDeleteEgressPolicy deletes the internal state associated with the given
-// policy.
+// policy, including egress eBPF map entries.
 func (manager *Manager) OnDeleteEgressPolicy(configID policyID) {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
@@ -159,8 +168,39 @@ func (manager *Manager) OnDeleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
 	manager.reconcile()
 }
 
-// addMissingEgressRules is responsible for adding any missing egress gateway policy stored in the
-// manager (i.e. k8s CiliumEgressNATPolicies) to the egress policy BPF map.
+// OnUpdateNode is the event handler for node additions and updates.
+func (manager *Manager) OnUpdateNode(node nodeTypes.Node) {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	manager.nodeDataStore[node.Name] = node
+	manager.onChangeNodeLocked()
+}
+
+// OnDeleteNode is the event handler for node deletions.
+func (manager *Manager) OnDeleteNode(node nodeTypes.Node) {
+	manager.mutex.Lock()
+	defer manager.mutex.Unlock()
+	delete(manager.nodeDataStore, node.Name)
+	manager.onChangeNodeLocked()
+}
+
+func (manager *Manager) onChangeNodeLocked() {
+	manager.nodes = []nodeTypes.Node{}
+	for _, n := range manager.nodeDataStore {
+		manager.nodes = append(manager.nodes, n)
+	}
+	sort.Slice(manager.nodes, func(i, j int) bool {
+		return manager.nodes[i].Name < manager.nodes[j].Name
+	})
+	manager.reconcile()
+}
+
+func (manager *Manager) regenerateGatewayConfigs() {
+	for _, policyConfig := range manager.policyConfigs {
+		policyConfig.regenerateGatewayConfig(manager)
+	}
+}
+
 func (manager *Manager) addMissingEgressRules() {
 	egressPolicies := map[egressmap.EgressPolicyKey4]egressmap.EgressPolicyVal4{}
 	egressmap.EgressPolicyMap.IterateWithCallback(
@@ -168,56 +208,35 @@ func (manager *Manager) addMissingEgressRules() {
 			egressPolicies[*key] = *val
 		})
 
-	for _, policyConfig := range manager.policyConfigs {
-		for _, endpoint := range manager.epDataStore {
-			if !policyConfig.selectsEndpoint(endpoint) {
-				continue
-			}
+	addEgressRule := func(endpointIP net.IP, dstCIDR *net.IPNet, gwc *gatewayConfig) {
+		policyKey := egressmap.NewEgressPolicyKey4(endpointIP, dstCIDR.IP, dstCIDR.Mask)
+		policyVal, policyPresent := egressPolicies[policyKey]
 
-			for _, endpointIP := range endpoint.ips {
-				for _, dstCIDR := range policyConfig.dstCIDRs {
-					policyKey := egressmap.NewEgressPolicyKey4(endpointIP, dstCIDR.IP, dstCIDR.Mask)
-					policyVal, policyPresent := egressPolicies[policyKey]
-
-					if policyPresent && policyVal.Match(policyConfig.egressIP, policyConfig.egressIP) {
-						continue
-					}
-
-					logger := log.WithFields(logrus.Fields{
-						logfields.SourceIP:        endpointIP,
-						logfields.DestinationCIDR: *dstCIDR,
-						logfields.EgressIP:        policyConfig.egressIP,
-						logfields.GatewayIP:       policyConfig.egressIP,
-					})
-
-					if err := egressmap.EgressPolicyMap.Update(endpointIP, *dstCIDR, policyConfig.egressIP, policyConfig.egressIP); err != nil {
-						logger.WithError(err).Error("Error applying egress gateway policy")
-					} else {
-						logger.Info("Egress gateway policy applied")
-					}
-				}
-			}
+		if policyPresent && policyVal.Match(gwc.egressIP.IP, gwc.gatewayIP) {
+			return
 		}
+
+		logger := log.WithFields(logrus.Fields{
+			logfields.SourceIP:        endpointIP,
+			logfields.DestinationCIDR: dstCIDR.String(),
+			logfields.EgressIP:        gwc.egressIP.IP,
+			logfields.GatewayIP:       gwc.gatewayIP,
+		})
+
+		if err := egressmap.EgressPolicyMap.Update(endpointIP, *dstCIDR, gwc.egressIP.IP, gwc.gatewayIP); err != nil {
+			logger.WithError(err).Error("Error applying egress gateway policy")
+		} else {
+			logger.Info("Egress gateway policy applied")
+		}
+	}
+
+	for _, policyConfig := range manager.policyConfigs {
+		policyConfig.forEachEndpointAndDestination(manager.epDataStore, addEgressRule)
 	}
 }
 
 // removeUnusedEgressRules is responsible for removing any entry in the egress policy BPF map which
 // is not baked by an actual k8s CiliumEgressNATPolicy.
-//
-// The algorithm for this function can be expressed as:
-//
-//    nextPolicyKey:
-//    for each entry in the egress_policy map {
-//        for each policy in k8s CiliumEgressNATPolices {
-//            if policy matches entry {
-//                // we found one k8s policy that matches the current BPF entry, move to the next one
-//                continue nextPolicyKey
-//            }
-//        }
-//
-//        // the current BPF entry is not backed by any k8s policy, delete it
-//        egressmap.RemoveEgressPolicy(entry)
-//    }
 func (manager *Manager) removeUnusedEgressRules() {
 	egressPolicies := map[egressmap.EgressPolicyKey4]egressmap.EgressPolicyVal4{}
 	egressmap.EgressPolicyMap.IterateWithCallback(
@@ -227,26 +246,21 @@ func (manager *Manager) removeUnusedEgressRules() {
 
 nextPolicyKey:
 	for policyKey, policyVal := range egressPolicies {
-		for _, policyConfig := range manager.policyConfigs {
-			for _, endpoint := range manager.epDataStore {
-				if !policyConfig.selectsEndpoint(endpoint) {
-					continue
-				}
+		matchPolicy := func(endpointIP net.IP, dstCIDR *net.IPNet, gwc *gatewayConfig) bool {
+			return policyKey.Match(endpointIP, dstCIDR) && policyVal.Match(gwc.egressIP.IP, gwc.gatewayIP)
+		}
 
-				for _, endpointIP := range endpoint.ips {
-					for _, dstCIDR := range policyConfig.dstCIDRs {
-						if policyKey.Match(endpointIP, dstCIDR) &&
-							policyVal.Match(policyConfig.egressIP, policyConfig.egressIP) {
-							continue nextPolicyKey
-						}
-					}
-				}
+		for _, policyConfig := range manager.policyConfigs {
+			if policyConfig.matches(manager.epDataStore, matchPolicy) {
+				continue nextPolicyKey
 			}
 		}
 
 		logger := log.WithFields(logrus.Fields{
 			logfields.SourceIP:        policyKey.GetSourceIP(),
-			logfields.DestinationCIDR: policyKey.GetDestCIDR(),
+			logfields.DestinationCIDR: policyKey.GetDestCIDR().String(),
+			logfields.EgressIP:        policyVal.GetEgressIP(),
+			logfields.GatewayIP:       policyVal.GetGatewayIP(),
 		})
 
 		if err := egressmap.EgressPolicyMap.Delete(policyKey.GetSourceIP(), *policyKey.GetDestCIDR()); err != nil {

@@ -7,10 +7,8 @@
 .. _egress-gateway:
 
 **********************
-Egress Gateway (beta)
+Egress Gateway
 **********************
-
-.. include:: ../beta.rst
 
 .. note::
 
