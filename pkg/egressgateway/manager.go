@@ -31,7 +31,7 @@ type k8sCacheSyncedChecker interface {
 // endpoint, and lease mappings. It also hooks up all the callbacks to update
 // egress bpf policy map accordingly.
 type Manager struct {
-	mutex lock.Mutex
+	lock.Mutex
 
 	// k8sCacheSyncedChecker is used to check if the agent has synced its
 	// cache with the k8s API server
@@ -76,9 +76,9 @@ func (manager *Manager) runReconciliationAfterK8sSync() {
 			time.Sleep(1 * time.Second)
 		}
 
-		manager.mutex.Lock()
+		manager.Lock()
 		manager.reconcile()
-		manager.mutex.Unlock()
+		manager.Unlock()
 	}()
 }
 
@@ -87,8 +87,8 @@ func (manager *Manager) runReconciliationAfterK8sSync() {
 // OnAddEgressPolicy parses the given policy config, and updates internal state
 // with the config fields.
 func (manager *Manager) OnAddEgressPolicy(config PolicyConfig) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.Lock()
+	defer manager.Unlock()
 
 	logger := log.WithField(logfields.CiliumEgressNATPolicyName, config.id.Name)
 
@@ -106,8 +106,8 @@ func (manager *Manager) OnAddEgressPolicy(config PolicyConfig) {
 // OnDeleteEgressPolicy deletes the internal state associated with the given
 // policy, including egress eBPF map entries.
 func (manager *Manager) OnDeleteEgressPolicy(configID policyID) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.Lock()
+	defer manager.Unlock()
 
 	logger := log.WithField(logfields.CiliumEgressNATPolicyName, configID.Name)
 
@@ -128,8 +128,8 @@ func (manager *Manager) OnUpdateEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
 	var epData *endpointMetadata
 	var err error
 
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.Lock()
+	defer manager.Unlock()
 
 	logger := log.WithFields(logrus.Fields{
 		logfields.K8sEndpointName: endpoint.Name,
@@ -155,8 +155,8 @@ func (manager *Manager) OnUpdateEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
 
 // OnDeleteEndpoint is the event handler for endpoint deletions.
 func (manager *Manager) OnDeleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.Lock()
+	defer manager.Unlock()
 
 	id := types.NamespacedName{
 		Name:      endpoint.GetName(),
@@ -170,16 +170,16 @@ func (manager *Manager) OnDeleteEndpoint(endpoint *k8sTypes.CiliumEndpoint) {
 
 // OnUpdateNode is the event handler for node additions and updates.
 func (manager *Manager) OnUpdateNode(node nodeTypes.Node) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.Lock()
+	defer manager.Unlock()
 	manager.nodeDataStore[node.Name] = node
 	manager.onChangeNodeLocked()
 }
 
 // OnDeleteNode is the event handler for node deletions.
 func (manager *Manager) OnDeleteNode(node nodeTypes.Node) {
-	manager.mutex.Lock()
-	defer manager.mutex.Unlock()
+	manager.Lock()
+	defer manager.Unlock()
 	delete(manager.nodeDataStore, node.Name)
 	manager.onChangeNodeLocked()
 }
