@@ -484,6 +484,7 @@ inlining
 inodes
 installIptablesRules
 installNoConntrackIptablesRules
+installRoutes
 integrations
 internet
 intra
