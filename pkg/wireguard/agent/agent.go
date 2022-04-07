@@ -214,7 +214,7 @@ func (a *Agent) Init(ipcache *ipcache.IPCache, mtuConfig mtu.Configuration) erro
 		}
 	}
 
-	fwMark := linux_defaults.RouteMarkEncrypt
+	fwMark := linux_defaults.MagicMarkWireGuardEncrypted
 	cfg := wgtypes.Config{
 		PrivateKey:   &a.privKey,
 		ListenPort:   &a.listenPort,

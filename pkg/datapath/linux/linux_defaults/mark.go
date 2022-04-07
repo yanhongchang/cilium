@@ -82,6 +82,9 @@ const (
 	// MagicMarkK8sDrop determines that the traffic should be dropped in
 	// kubernetes environments.
 	MagicMarkK8sDrop int = 0x8000
+
+    // TODO(brb)
+    MagicMarkWireGuardEncrypted int = 0x1E00
 )
 
 // getMagicMark returns the magic marker with which each packet must be marked.

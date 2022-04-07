@@ -1152,10 +1152,10 @@ out:
 		if (!revalidate_data(ctx, &data, &data_end, &ip4))
 			return DROP_INVALID;
 
-		//trace_printk(fmt1, sizeof(fmt1), ip4->saddr, ip4->daddr, ETH_HLEN);
+		//trace_printk(fmt1, sizeof(fmt1), ip4->saddr, ip4->daddr, ctx->mark);
 
 		info = lookup_ip4_remote_endpoint(ip4->daddr);
-		if (((ctx->mark & MARK_MAGIC_ENCRYPT) != MARK_MAGIC_ENCRYPT) && info != NULL && info->key) {
+		if (((ctx->mark & MARK_MAGIC_WG_ENCRYPTED) != MARK_MAGIC_WG_ENCRYPTED) && info != NULL && info->key) {
 		        //trace_printk(fmt2, sizeof(fmt2), ip4->saddr, ip4->daddr, ctx->mark);
 			return ctx_redirect(ctx, WG_IFINDEX, 0);
 		}
