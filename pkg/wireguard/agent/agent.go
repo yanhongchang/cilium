@@ -36,6 +36,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/wireguard/types"
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 )
 
 const (
@@ -213,7 +214,7 @@ func (a *Agent) Init(ipcache *ipcache.IPCache, mtuConfig mtu.Configuration) erro
 		}
 	}
 
-	fwMark := 0x4d2
+	fwMark := linux_defaults.RouteMarkEncrypt
 	cfg := wgtypes.Config{
 		PrivateKey:   &a.privKey,
 		ListenPort:   &a.listenPort,

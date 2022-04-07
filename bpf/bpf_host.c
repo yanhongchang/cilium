@@ -1146,14 +1146,17 @@ out:
 		struct remote_endpoint_info *info;
 		void *data, *data_end;
 		struct iphdr *ip4;
-		//char fmt[] = "foo: %x %x %x\n";
+		//char fmt1[] = "foo: %x %x %x\n";
+		//char fmt2[] = "bar: %x %x %x\n";
 
 		if (!revalidate_data(ctx, &data, &data_end, &ip4))
 			return DROP_INVALID;
 
+		//trace_printk(fmt1, sizeof(fmt1), ip4->saddr, ip4->daddr, ETH_HLEN);
+
 		info = lookup_ip4_remote_endpoint(ip4->daddr);
-		if (((ctx->mark & 0x4d2) != 0x4d2) && info != NULL && info->key) {
-		        //trace_printk(fmt, sizeof(fmt), ip4->saddr, ip4->daddr, ctx->mark);
+		if (((ctx->mark & MARK_MAGIC_ENCRYPT) != MARK_MAGIC_ENCRYPT) && info != NULL && info->key) {
+		        //trace_printk(fmt2, sizeof(fmt2), ip4->saddr, ip4->daddr, ctx->mark);
 			return ctx_redirect(ctx, WG_IFINDEX, 0);
 		}
 	}
