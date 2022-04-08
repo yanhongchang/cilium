@@ -848,46 +848,6 @@ ct_recreate4:
 	}
 #endif /* ENABLE_HOST_FIREWALL && !ENABLE_ROUTING */
 
-#ifdef ENABLE_EGRESS_GATEWAY
-	{
-		struct egress_gw_policy_entry *egress_gw_policy;
-		struct endpoint_key key = {};
-
-		/* If the packet is destined to an entity inside the cluster,
-		 * either EP or node, it should not be forwarded to an egress
-		 * gateway since only traffic leaving the cluster is supposed to
-		 * be masqueraded with an egress IP.
-		 */
-		if (is_cluster_destination(ip4, *dst_id, tunnel_endpoint))
-			goto skip_egress_gateway;
-
-		/* If the packet is a reply or is related, it means that outside
-		 * has initiated the connection, and so we should skip egress
-		 * gateway, since an egress policy is only matching connections
-		 * originating from a pod.
-		 */
-		if (ct_status == CT_REPLY || ct_status == CT_RELATED)
-			goto skip_egress_gateway;
-
-		egress_gw_policy = lookup_ip4_egress_gw_policy(ip4->saddr, ip4->daddr);
-		if (!egress_gw_policy)
-			goto skip_egress_gateway;
-
-		/* Encap and redirect the packet to egress gateway node through a tunnel.
-		 * Even if the tunnel endpoint is on the same host, follow the same data
-		 * path to be consistent. In future, it can be optimized by directly
-		 * direct to external interface.
-		 */
-		ret = encap_and_redirect_lxc(ctx, egress_gw_policy->gateway_ip, encrypt_key,
-					     &key, SECLABEL, &trace);
-		if (ret == IPSEC_ENDPOINT)
-			goto encrypt_to_stack;
-		else
-			return ret;
-	}
-skip_egress_gateway:
-#endif
-
 #ifdef ENABLE_VTEP
 	{
 		int i;
@@ -990,7 +950,7 @@ pass_to_stack:
 #endif
 	}
 
-#if defined(TUNNEL_MODE) || defined(ENABLE_EGRESS_GATEWAY)
+#if defined(TUNNEL_MODE)
 encrypt_to_stack:
 #endif
 	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL, *dst_id, 0, 0,

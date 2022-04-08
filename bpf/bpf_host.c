@@ -1131,6 +1131,79 @@ out:
 					      METRIC_EGRESS);
 #endif /* ENABLE_HOST_FIREWALL */
 
+#if defined(ENABLE_EGRESS_GATEWAY) && defined(ENABLE_IPV4)
+	{
+		void *data, *data_end;
+		struct iphdr *ip4;
+
+		struct endpoint_info *local_ep;
+		struct remote_endpoint_info *remote_ep;
+
+		struct egress_gw_policy_entry *egress_gw_policy;
+
+		if (!revalidate_data(ctx, &data, &data_end, &ip4))
+			return DROP_INVALID;
+
+		remote_ep = lookup_ip4_remote_endpoint(ip4->daddr);
+		if (remote_ep) {
+			struct ipv4_ct_tuple tuple = {};
+			struct ct_state ct_state = {};
+			enum ct_status ct_status;
+
+			/* If the packet is destined to an entity inside the cluster,
+			 * either EP or node, it should not be forwarded to an egress
+			 * gateway since only traffic leaving the cluster is supposed to
+			 * be masqueraded with an egress IP.
+			 */
+			if (is_cluster_destination(ip4, remote_ep->sec_label,
+						   remote_ep->tunnel_endpoint))
+				goto skip_egress_gateway;
+
+			tuple.nexthdr = ip4->protocol;
+			tuple.daddr = ip4->daddr;
+			tuple.saddr = ip4->saddr;
+
+			/* If the packet is a reply or is related, it means that outside
+			 * has initiated the connection, and so we should skip egress
+			 * gateway, since an egress policy is only matching connections
+			 * originating from a pod.
+			 */
+			ret = ct_lookup4(get_ct_map4(&tuple), &tuple, ctx,
+					 ETH_HLEN + ipv4_hdrlen(ip4), CT_EGRESS,
+					 &ct_state, &trace.monitor);
+			if (ret < 0)
+				return ret;
+
+			ct_status = (enum ct_status)ret;
+			if (ct_status == CT_REPLY || ct_status == CT_RELATED)
+				goto skip_egress_gateway;
+		}
+
+		egress_gw_policy = lookup_ip4_egress_gw_policy(ip4->saddr, ip4->daddr);
+		if (!egress_gw_policy)
+			goto skip_egress_gateway;
+
+		/* If the gateway node is the local node, then just let the
+		 * packet go through, as it will be SNATed later on by
+		 * handle_nat_fwd().
+		 */
+		local_ep = __lookup_ip4_endpoint(egress_gw_policy->gateway_ip);
+		if (local_ep && (local_ep->flags & ENDPOINT_F_HOST))
+			goto skip_egress_gateway;
+
+		/* Otherwise encap and redirect the packet to egress gateway
+		 * node through a tunnel.
+		 */
+		ret = encap_and_redirect_with_nodeid(ctx, egress_gw_policy->gateway_ip, 0,
+						     SECLABEL, &trace);
+		if (ret == IPSEC_ENDPOINT)
+			return CTX_ACT_OK;
+		else
+			return ret;
+	}
+skip_egress_gateway:
+#endif
+
 #if defined(ENABLE_BANDWIDTH_MANAGER)
 	ret = edt_sched_departure(ctx);
 	/* No send_drop_notify_error() here given we're rate-limiting. */
