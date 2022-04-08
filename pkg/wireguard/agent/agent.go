@@ -27,6 +27,8 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/cidr"
+	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
+	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
@@ -36,7 +38,6 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/wireguard/types"
-	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 )
 
 const (
@@ -242,8 +243,45 @@ func (a *Agent) Init(ipcache *ipcache.IPCache, mtuConfig mtu.Configuration) erro
 		a.restoredPubKeys[peer.PublicKey] = struct{}{}
 	}
 
+	deleteObsoleteIPRules()
+
 	// this is read by the defer statement above
 	addIPCacheListener = true
+
+	return nil
+}
+
+func deleteObsoleteIPRules() error {
+	rule := route.Rule{
+		Priority: linux_defaults.RulePriorityWireguard,
+		Mark:     linux_defaults.RouteMarkEncrypt,
+		Mask:     linux_defaults.RouteMarkMask,
+		Table:    linux_defaults.RouteTableWireguard,
+	}
+	rt := route.Route{
+		Device: types.IfaceName,
+		Table:  linux_defaults.RouteTableWireguard,
+	}
+	if option.Config.EnableIPv4 {
+		route.DeleteRule(rule)
+
+		subnet := net.IPNet{
+			IP:   net.IPv4zero,
+			Mask: net.CIDRMask(0, 8*net.IPv4len),
+		}
+		rt.Prefix = subnet
+		route.Delete(rt)
+	}
+	if option.Config.EnableIPv6 {
+		route.DeleteRuleIPv6(rule)
+
+		subnet := net.IPNet{
+			IP:   net.IPv6zero,
+			Mask: net.CIDRMask(0, 8*net.IPv6len),
+		}
+		rt.Prefix = subnet
+		route.Delete(rt)
+	}
 
 	return nil
 }
